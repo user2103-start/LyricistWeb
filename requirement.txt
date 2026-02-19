@@ -1,3 +1,5 @@
-streamlit
-requests
-lyricsgenius
+pyrogram
+tgcrypto
+opencv-python-headless
+img2pdf
+flask
