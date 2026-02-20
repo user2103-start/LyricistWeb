@@ -3,14 +3,13 @@ import asyncio
 from pyrogram import Client, filters
 from fastapi import FastAPI
 import uvicorn
-from threading import Thread
 
-# 1. FastAPI Setup (Render isey turant detect kar lega)
+# 1. FastAPI Setup (Render ki Web Service ke liye compulsory hai)
 app_web = FastAPI()
 
 @app_web.get("/")
-def read_root():
-    return {"status": "Bot is Running", "owner": "6593129349"}
+def home():
+    return {"status": "Bot is Running", "devil_killed": True}
 
 # 2. Bot Credentials
 API_ID = 38456866
@@ -21,20 +20,21 @@ bot = Client("LyricistBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 
 @bot.on_message(filters.command("start"))
 async def start_cmd(client, message):
-    await message.reply_text("Zinda hoon! Render ki knife ab nahi chalegi. 😎")
+    await message.reply_text("Zinda hoon! Web Service pe kabza kar liya hai. 😎")
 
-# 3. Running both FastAPI and Bot
-async def run_bot():
-    print("🚀 Starting Telegram Bot...")
-    await bot.start()
-    await asyncio.Event().wait()
+# 3. Main Logic: FastAPI ke saath Bot ko start karna
+@app_web.on_event("startup")
+async def start_bot():
+    # Ye line bot ko background mein bina loop error ke start karegi
+    asyncio.create_task(bot.start())
+    print("✅ Telegram Bot Started in Background")
+
+@app_web.on_event("shutdown")
+async def stop_bot():
+    await bot.stop()
 
 if __name__ == "__main__":
-    # Bot ko background thread mein chalao
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
-    
-    # FastAPI ko main thread mein chalao (Isse Port error nahi aayega)
+    # Render hamesha PORT environment variable bhejta hai
     port = int(os.environ.get("PORT", 8080))
-    print(f"📡 Starting Web Server on port {port}")
+    # Uvicorn hi main loop handle karega, isliye 'no current event loop' nahi aayega
     uvicorn.run(app_web, host="0.0.0.0", port=port)
