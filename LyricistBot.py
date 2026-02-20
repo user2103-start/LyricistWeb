@@ -1,47 +1,40 @@
 import os
 import asyncio
 from pyrogram import Client, filters
-from flask import Flask
+from fastapi import FastAPI
+import uvicorn
 from threading import Thread
 
-# 1. Flask Setup (Isi se Render ko 'Zinda' hone ka signal milega)
-web = Flask(__name__)
+# 1. FastAPI Setup (Render isey turant detect kar lega)
+app_web = FastAPI()
 
-@web.route('/')
-def home():
-    return "Bot is Live! 🚀"
-
-def run_web():
-    # Render hamesha PORT environment variable bhejta hai
-    # Isko milte hi Render ka 'No open ports' error gayab ho jayega
-    port = int(os.environ.get("PORT", 8080))
-    web.run(host="0.0.0.0", port=port)
+@app_web.get("/")
+def read_root():
+    return {"status": "Bot is Running", "owner": "6593129349"}
 
 # 2. Bot Credentials
 API_ID = 38456866
 API_HASH = "30a8f347f538733a1d57dae8cc458ddc"
 BOT_TOKEN = "8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg"
 
-app = Client("LyricistBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = Client("LyricistBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply_text("Zinda hoon! Render ne port dhoond liya. 😎")
+@bot.on_message(filters.command("start"))
+async def start_cmd(client, message):
+    await message.reply_text("Zinda hoon! Render ki knife ab nahi chalegi. 😎")
 
-# 3. Ultimate Runner
-async def main():
-    # Flask ko pehle start karo taaki Render ko port mil jaye
-    server_thread = Thread(target=run_web)
-    server_thread.daemon = True
-    server_thread.start()
-    
-    print("🚀 Starting Bot...")
-    async with app:
-        print("✅ BOT IS LIVE ON TELEGRAM!")
-        await asyncio.Event().wait()
+# 3. Running both FastAPI and Bot
+async def run_bot():
+    print("🚀 Starting Telegram Bot...")
+    await bot.start()
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"Error: {e}")
+    # Bot ko background thread mein chalao
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_bot())
+    
+    # FastAPI ko main thread mein chalao (Isse Port error nahi aayega)
+    port = int(os.environ.get("PORT", 8080))
+    print(f"📡 Starting Web Server on port {port}")
+    uvicorn.run(app_web, host="0.0.0.0", port=port)
