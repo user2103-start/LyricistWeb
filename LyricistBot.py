@@ -4,14 +4,16 @@ from pyrogram import Client, filters
 from flask import Flask
 from threading import Thread
 
-# 1. Flask Server setup
+# 1. Flask Setup (Isi se Render ko 'Zinda' hone ka signal milega)
 web = Flask(__name__)
 
 @web.route('/')
 def home():
-    return "Bot is Alive! 🚀"
+    return "Bot is Live! 🚀"
 
 def run_web():
+    # Render hamesha PORT environment variable bhejta hai
+    # Isko milte hi Render ka 'No open ports' error gayab ho jayega
     port = int(os.environ.get("PORT", 8080))
     web.run(host="0.0.0.0", port=port)
 
@@ -24,26 +26,22 @@ app = Client("LyricistBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("Zinda hoon bhai! Render ki knife se bach nikla. 😎")
+    await message.reply_text("Zinda hoon! Render ne port dhoond liya. 😎")
 
-# 3. Tank-Proof Runner Logic
+# 3. Ultimate Runner
 async def main():
-    # Flask ko background thread mein start karo
-    Thread(target=run_web, daemon=True).start()
+    # Flask ko pehle start karo taaki Render ko port mil jaye
+    server_thread = Thread(target=run_web)
+    server_thread.daemon = True
+    server_thread.start()
     
-    print("Bot starting...")
+    print("🚀 Starting Bot...")
     async with app:
-        print("✅ BOT IS LIVE!")
-        # Isse bot chalta rahega bina loop crash kiye
+        print("✅ BOT IS LIVE ON TELEGRAM!")
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    # Naye Python versions ke liye sabse safe tareeka
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    except RuntimeError:
-        # Agar loop pehle se chal raha ho (rare case on Render)
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
+    except Exception as e:
+        print(f"Error: {e}")
