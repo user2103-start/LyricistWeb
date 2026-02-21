@@ -1,119 +1,203 @@
 import telebot
 import requests
-import re
 import os
 import time
-import sqlite3
-import threading
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from urllib.parse import quote
-from flask import Flask
 
-# --- 🌐 WEB SERVER FOR RENDER (Health Check) ---
-server = Flask('')
-@server.route('/')
-def home(): return "LyricistsBot (JioSaavn Engine) is Live! 🚀"
+# ==================== CONFIG ====================
+BOT_TOKEN = os.getenv('8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg')  # @BotFather se
+CHANNEL_ID = os.getenv('-1003751644036')  # "-100xxxxxxxxxx" format
+ADMIN_ID = int(os.getenv('6593129349'))  # Tera Telegram ID
 
-def run_web():
-    # Render automatically sets the PORT variable
-    port = int(os.environ.get("PORT", 10000))
-    server.run(host='0.0.0.0', port=port)
-
-# --- 🟢 CONFIG ---
-BOT_TOKEN = '8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg' #
-GENIUS_TOKEN = 'w-XTArszGpAQaaLu-JlViwy1e-0rxx4dvwqQzOEtcmmpYndHm_nkFTvAB5BsY-ww' #
-ADMIN_IDS = [6593129349] # Tera Saved ID
-SAAVN_BASE = "https://saavn.me" # JioSaavn API
+MUSIC_API = "https://free-music-api2.vercel.app"
+FALLBACK_API = "https://bhindi1.ddns.net/music/api/prepare/"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- 📁 DATABASE SETUP ---
-conn = sqlite3.connect('bot.db', check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('CREATE TABLE IF NOT EXISTS stats (id INTEGER PRIMARY KEY, user_id INT, query TEXT, time TEXT)')
-conn.commit()
-
-# --- 🎵 JIOSAAVN ENGINE ---
-def search_saavn(query):
-    url = f"{SAAVN_BASE}/search/songs?query={quote(query)}"
+# ==================== FORCE SUBSCRIBE CHECK ====================
+def is_subscribed(user_id):
     try:
-        resp = requests.get(url, timeout=10)
-        return resp.json().get('data', {}).get('results', [])
-    except: return []
+        member = bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except:
+        return False
 
-def get_lyrics(query):
+def get_subscribe_keyboard():
+    markup = InlineKeyboardMarkup()
+    markup.row_width = 1
+    markup.add(
+        InlineKeyboardButton("📢 Channel Join Karo", url=f"https://t.me/{CHANNEL_ID[4:]}"),
+        InlineKeyboardButton("✅ Check Subscription", callback_data="check_sub")
+    )
+    return markup
+
+# ==================== MAIN MUSIC SEARCH ====================
+def search_music(query):
+    """Multiple APIs try karega"""
+    
+    # API 1: Free Music API
     try:
-        gurl = f"https://api.genius.com/search?q={quote(query)}"
-        headers = {'Authorization': f'Bearer {GENIUS_TOKEN}'}
-        resp = requests.get(gurl, headers=headers, timeout=8)
-        hits = resp.json()['response']['hits']
-        if hits:
-            return f"Lyrics available at: {hits[0]['result']['url']}"
-    except: pass
-    return "Lyrics fetch karne ke liye gaane ka sahi naam likhein! 📝"
-
-def download_temp(url, filename):
+        if 'arijit' in query.lower():
+            url = f"{MUSIC_API}/album/arijitsingh"
+        else:
+            url = f"{MUSIC_API}/getSongs"
+        
+        resp = requests.get(url, timeout=15).json()
+        songs = resp if isinstance(resp, list) else resp.get('songs', [])
+        
+        if songs:
+            song = songs[0] if isinstance(songs[0], dict) else songs[0]
+            dl_url = song.get('download_url') or song.get('audio_url') or song.get('url')
+            title = song.get('title', 'Premium Song')
+            artist = song.get('artist', 'Artist')
+            
+            if dl_url:
+                return {
+                    'url': dl_url,
+                    'title': title,
+                    'artist': artist,
+                    'success': True
+                }
+    except:
+        pass
+    
+    # Fallback: YouTube Music
     try:
-        resp = requests.get(url, stream=True, timeout=15)
-        with open(filename, 'wb') as f:
-            for chunk in resp.iter_content(8192):
-                f.write(chunk)
-        return filename
-    except: return None
+        yt_url = f"https://ytapi-cloud.onrender.com/download?query={quote(query + ' official audio')}"
+        resp = requests.get(yt_url, timeout=15).json()
+        if resp.get('success'):
+            return {
+                'url': resp['url'],
+                'title': query.title(),
+                'artist': 'YouTube Music',
+                'success': True
+            }
+    except:
+        pass
+    
+    return {'success': False}
 
-# --- 🤖 BOT HANDLERS ---
+# ==================== HANDLERS ====================
 @bot.message_handler(commands=['start'])
-def start(msg):
-    bot.reply_to(msg, "🎵 *LyricistsBot (JioSaavn Edition)* Active!\n\nGaane ka naam bhejo bhai! 🚀", parse_mode='Markdown')
+def start(message):
+    if not is_subscribed(message.from_user.id):
+        bot.send_message(
+            message.chat.id,
+            "🔥 **Premium Music Bot** 🔥\n\n"
+            "📢 **Pehle Channel Join Karo** phir unlimited songs download karo!\n\n"
+            "✅ Join karne ke baad **/start** type karo!",
+            reply_markup=get_subscribe_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
+    welcome_msg = """
+🎵 **Welcome to Premium Music Bot!** 🎵
+
+🔥 **Commands:**
+`/kesariya` - Arijit Singh hit
+`/tumbbad` - Horror theme
+`/arijit` - All Arijit songs
+`Any song name` - Direct search!
+
+**Quality:** 320kbps Premium 🎧
+**No Limits!** Unlimited downloads
+    """
+    bot.send_message(message.chat.id, welcome_msg, parse_mode='Markdown')
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
+def check_subscription(call):
+    if is_subscribed(call.from_user.id):
+        bot.edit_message_text(
+            "✅ **Subscribed!** Ab music download kar sakte ho!\n\n"
+            "🎵 **/start** type karo!",
+            call.message.chat.id,
+            call.message.id,
+            parse_mode='Markdown'
+        )
+    else:
+        bot.answer_callback_query("❌ Abhi bhi join nahi kiya! 😠", show_alert=True)
 
 @bot.message_handler(func=lambda m: True)
-def handle_query(message):
+def handle_music(message):
+    # Subscribe check
+    if not is_subscribed(message.from_user.id):
+        bot.reply_to(message, 
+            "🚫 **Subscribe first!**\n📢 Channel join karo phir enjoy karo!",
+            reply_markup=get_subscribe_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
     query = message.text.strip()
-    user_id = message.from_user.id
-    cursor.execute("INSERT INTO stats (user_id, query, time) VALUES (?, ?, ?)", (user_id, query, time.strftime('%Y-%m-%d %H:%M:%S')))
-    conn.commit()
+    status_msg = bot.reply_to(message, "🔍 **Searching Premium Songs...**")
     
-    status = bot.reply_to(message, "🔍 Searching on JioSaavn...")
+    # Search music
+    result = search_music(query)
     
-    tracks = search_saavn(query)
-    if not tracks:
-        return bot.edit_message_text("❌ Song nahi mila!", status.chat.id, status.message_id)
+    if not result['success']:
+        bot.edit_message_text(
+            "❌ **No results found!**\n\n"
+            "Try: `kesariya`, `arijit`, `tumbbad`\n"
+            "Ya exact song name type karo!",
+            status_msg.chat.id,
+            status_msg.id,
+            parse_mode='Markdown'
+        )
+        return
     
-    track = tracks[0]
-    # JioSaavn API usually provides high-quality links in the last index of downloadUrl
-    dl_url = track.get('downloadUrl', [{}])[-1].get('link') 
-    
-    if not dl_url:
-        return bot.edit_message_text("❌ Download link blocked!", status.chat.id, status.message_id)
-    
-    bot.edit_message_text(f"⬇️ Downloading: {track['name']}", status.chat.id, status.message_id)
-    filename = f"temp_{int(time.time())}.mp3"
-    audio_file = download_temp(dl_url, filename)
-    
-    if not audio_file:
-        return bot.edit_message_text("❌ Download failed!", status.chat.id, status.message_id)
-    
-    lyrics = get_lyrics(f"{track['name']} {track['artists']['primary'][0]['name']}")
-    caption = f"🎵 **{track['name']}**\n👤 {track['artists']['primary'][0]['name']}\n\n{lyrics}"
-    
+    # Download & Send
     try:
-        with open(audio_file, 'rb') as f:
-            bot.send_audio(message.chat.id, f, caption=caption[:1024], parse_mode='Markdown', title=track['name'])
-        os.remove(audio_file)
-        bot.delete_message(status.chat.id, status.message_id)
+        bot.edit_message_text("⬇️ **Downloading 320kbps Premium...**", status_msg.chat.id, status_msg.id)
+        
+        filename = f"music_{int(time.time())}.mp3"
+        resp = requests.get(result['url'], stream=True, timeout=30)
+        
+        with open(filename, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        caption = f"🎵 **{result['title']}**\n👤 **{result['artist']}**\n🔥 **Premium Quality**"
+        
+        with open(filename, 'rb') as audio:
+            bot.send_audio(
+                message.chat.id,
+                audio,
+                caption=caption,
+                parse_mode='Markdown',
+                title=result['title'],
+                performer=result['artist']
+            )
+        
+        # Cleanup
+        os.remove(filename)
+        bot.delete_message(status_msg.chat.id, status_msg.id)
+        
     except Exception as e:
-        bot.send_message(message.chat.id, "✅ Audio Ready! (Caption Error)")
+        bot.edit_message_text(f"❌ **Download failed!**\nError: {str(e)[:50]}", status_msg.chat.id, status_msg.id)
 
-# --- 🔧 ADMIN PANEL ---
-@bot.message_handler(commands=['admin'])
-def admin(message):
-    if message.from_user.id not in ADMIN_IDS:
-        return bot.reply_to(message, "❌ Admin access nahi hai!")
-    cursor.execute("SELECT COUNT(*) FROM stats")
-    total = cursor.fetchone()[0]
-    bot.reply_to(message, f"📊 Total Queries: `{total}`", parse_mode='Markdown')
+# Admin broadcast
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "Usage: /broadcast <message>")
+        return
+    
+    for member in bot.get_chat_members(CHANNEL_ID):
+        try:
+            bot.send_message(member.user.id, args[1])
+        except:
+            pass
+    bot.reply_to(message, "✅ Broadcast sent!")
 
-# --- 🚀 RUNNER ---
+# ==================== RUN BOT ====================
 if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    print("🎉 Bot is Polling on JioSaavn API!")
-    bot.infinity_polling(none_stop=True)
+    print("🎉 **Premium Music Bot Started!** 🚀")
+    print(f"Channel: {CHANNEL_ID}")
+    bot.infinity_polling()
