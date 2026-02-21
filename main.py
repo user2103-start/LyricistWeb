@@ -1,73 +1,95 @@
-import os
-import asyncio
-import threading
+import telebot
 import requests
+import sqlite3
+import os
+import time
+import threading
+from urllib.parse import quote
 from flask import Flask
-from pyrogram import Client, filters
 
-# --- 🌐 WEB SERVER (RENDER HEALTH CHECK) ---
-web_app = Flask(__name__)
-@web_app.route('/')
-def home(): return "LyricistBot is Active! 🎧"
+# --- 🌐 WEB SERVER FOR RENDER (Health Check) ---
+server = Flask('')
+@server.route('/')
+def home(): return "LyricistsBot is Live! 🚀"
 
-def run_flask():
+def run_web():
     port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+    server.run(host='0.0.0.0', port=port)
 
-# --- 🟢 BOT CONFIG ---
-API_ID = 38456866
-API_HASH = "30a8f347f538733a1d57dae8cc458ddc"
-BOT_TOKEN = "8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg"
+# --- 🟢 CONFIG ---
+BOT_TOKEN = '8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg'
+ADMIN_IDS = [6593129349] # Tera Saved ID
+GENIUS_TOKEN = 'w-XTArszGpAQaaLu-JlViwy1e-0rxx4dvwqQzOEtcmmpYndHm_nkFTvAB5BsY-ww'
+API_BASE = "https://api.vyt-dlp.workers.dev" # Stable InnerTune Bridge
 
-app = Client("LyricistBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-@app.on_message(filters.command("song"))
-async def innertune_engine(client, message):
-    if len(message.command) < 2:
-        return await message.reply_text("❌ Gaane ka naam likho!")
+# SQLite setup
+conn = sqlite3.connect('bot.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE IF NOT EXISTS stats (user_id INT, query TEXT, timestamp TEXT)')
+conn.commit()
+
+def genius_lyrics(query):
+    url = f"https://api.genius.com/search?q={quote(query)}"
+    headers = {'Authorization': f'Bearer {GENIUS_TOKEN}'}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        data = resp.json()
+        if data['response']['hits']:
+            lyrics_path = data['response']['hits'][0]['result']['url']
+            return f"Check full lyrics here: {lyrics_path}"
+    except: pass
+    return "Lyrics temporarily unavailable 😅"
+
+def safe_download(url, filename):
+    try:
+        resp = requests.get(url, stream=True, timeout=20)
+        with open(filename, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return filename
+    except: return None
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "🎵 *LyricistsBot* Active!\n\nGaane ka naam bhejo bhai! 🚀", parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: True)
+def handle_song(message):
+    query = message.text.strip()
+    user_id = message.from_user.id
+    cursor.execute("INSERT INTO stats VALUES (?, ?, ?)", (user_id, query, time.strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
     
-    query = " ".join(message.command[1:])
-    m = await message.reply_text("🔍 **Searching on YT Music...**")
+    status_msg = bot.reply_to(message, "🔍 Searching high quality audio...")
     
     try:
-        search_url = f"https://api.vyt-dlp.workers.dev/search?q={query}"
-        search_res = requests.get(search_url).json()
+        # Using the stable InnerTune logic
+        search_res = requests.get(f"{API_BASE}/search?q={query}").json()
+        if not search_res.get('results'):
+            return bot.edit_message_text("❌ Nahi mila bhai!", message.chat.id, status_msg.id)
         
         track = search_res['results'][0]
-        video_id = track['id']
-        title = track['title']
+        bot.edit_message_text(f"⬇️ Downloading: {track['title']}", message.chat.id, status_msg.id)
         
-        dl_link = f"https://api.vyt-dlp.workers.dev/download?id={video_id}"
-        file_path = f"{title}.mp3".replace("/", "") # File name safety
-
-        await m.edit(f"📥 **Downloading:** {title}")
+        filename = f"temp_{int(time.time())}.mp3"
+        dl_url = f"{API_BASE}/download?id={track['id']}"
+        audio_file = safe_download(dl_url, filename)
         
-        r = requests.get(dl_link)
-        with open(file_path, 'wb') as f:
-            f.write(r.content)
-
-        await message.reply_audio(audio=open(file_path, 'rb'), title=title)
-        os.remove(file_path)
-        await m.delete()
-
+        lyrics = genius_lyrics(f"{track['title']}")
+        
+        with open(audio_file, 'rb') as f:
+            bot.send_audio(message.chat.id, f, caption=f"🎵 {track['title']}\n\n📝 {lyrics}")
+        
+        os.remove(audio_file)
+        bot.delete_message(message.chat.id, status_msg.id)
     except Exception as e:
-        await m.edit(f"❌ Error: {str(e)[:50]}")
+        bot.edit_message_text(f"❌ Error: {str(e)[:50]}", message.chat.id, status_msg.id)
 
-# --- 🛠️ THE ACTUAL FIX FOR RENDER ---
-async def main():
-    # Flask ko alag thread mein chalao
-    threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Bot ko start karo aur idle rakho
-    await app.start()
-    print("✅ Bot is Live and Engine is Ready!")
-    await asyncio.Event().wait()
-
+# --- 🚀 RUNNER ---
 if __name__ == "__main__":
-    # Naya event loop create karke use set karna
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        pass
+    # Start Flask in background
+    threading.Thread(target=run_web, daemon=True).start()
+    print("🚀 Bot started - Pure Sync Mode!")
+    bot.infinity_polling()
