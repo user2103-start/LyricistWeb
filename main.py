@@ -9,7 +9,7 @@ from flask import Flask, request
 import jiosaavn  # JioSaavn API!
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg"
+BOT_TOKEN = "8454384380:AAH1XIgIJ4qnzvJasPCNgpU7rSlPbiflbRY"
 CHANNEL_ID = "-1003751644036"
 CHANNEL_LINK = "https://t.me/+JPgViOHx7bdlMDZl"
 ADMIN_ID = 6593129349
