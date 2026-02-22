@@ -1,35 +1,54 @@
 import telebot
 import requests
 import os
+import time
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import lyricsgenius
+from urllib.parse import quote
 
 # ==================== CONFIG ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8454384380:AAEsXBAm3IrtW3Hf1--2mH3xAyhnan-J3lg")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "-1003751644036")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6593129349"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 GENIUS_TOKEN = "w-XTArszGpAQaaLu-JlViwy1e-0rxx4dvwqQzOEtcmmpYndHm_nkFTvAB5BsY-ww"
 
 MUSIC_API = "https://free-music-api2.vercel.app"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Anti-409 Protection
+print("🔄 **Starting bot with 409 protection...**")
+time.sleep(5)  # Wait for old instance to die
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
+
+# Genius
 genius = lyricsgenius.Genius(GENIUS_TOKEN, verbose=False)
 
-# Force Subscribe
+print("✅ **Bot initialized!**")
+
+# ==================== STRICT FORCE SUBSCRIBE ====================
 def is_subscribed(user_id):
     try:
-        bot.get_chat_member(CHANNEL_ID, user_id)
-        return True
+        member = bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ['member', 'administrator', 'creator']
     except:
         return False
 
-# ==================== SONG + LYRICS ENGINE ====================
-def get_any_song(query):
+# Song + Lyrics functions (same as before)
+def get_exact_song(query):
     try:
-        url = f"{MUSIC_API}/getSongs?q={query}"
-        resp = requests.get(url, timeout=10).json()
+        search_url = f"{MUSIC_API}/getSongs?q={quote(query)}"
+        resp = requests.get(search_url, timeout=10).json()
         
         if isinstance(resp, list) and len(resp) > 0:
+            for song in resp:
+                title = (song.get('title') or '').lower()
+                if query.lower() in title:
+                    return {
+                        'url': song.get('download_url') or song.get('url'),
+                        'title': song.get('title', query),
+                        'artist': song.get('artist', 'Artist'),
+                        'success': True
+                    }
             song = resp[0]
             return {
                 'url': song.get('download_url') or song.get('url'),
@@ -39,60 +58,95 @@ def get_any_song(query):
             }
     except:
         pass
-    
     return {'success': False}
 
-def get_lyrics(query):
+def get_exact_lyrics(query):
     try:
         songs = genius.search(query)
         if songs:
-            song = songs[0]
-            lyrics = genius.lyrics(song.id)
-            lines = [l.strip() for l in lyrics.split('\n')[:12] if l.strip()]
-            formatted = f"🎤 **{song.title}**\n👤 **{song.artist}**\n\n"
-            for line in lines:
-                formatted += f"**`{line}`**\n"
-            return formatted[:4000]
+            for song in songs:
+                title = song.title.lower()
+                if query.lower() in title:
+                    lyrics = genius.lyrics(song.id)
+                    return format_lyrics(song.title, song.artist, lyrics)
     except:
         pass
     return None
 
-# ==================== 5 SUPER SIMPLE COMMANDS ====================
+def format_lyrics(title, artist, lyrics):
+    lines = [line.strip() for line in lyrics.split('\n') if line.strip()][:15]
+    formatted = f"🎤 **{title}**\n👤 **{artist}**\n\n"
+    for line in lines:
+        formatted += f"**`{line}`**\n"
+    return formatted
+
+# ==================== COMMANDS ====================
 @bot.message_handler(commands=['start'])
-def start(message):
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📢 Join Channel", url="https://t.me/+JPgViOHx7bdlMDZl"))
+def start_command(message):
+    user_id = message.from_user.id
+    is_admin = user_id == ADMIN_ID
     
-    bot.send_message(message.chat.id, 
-        "🎤 **MUSIC + LYRICS BOT** 🎵\n\n"
-        "**Kaise use karo:**\n"
-        "`tum hi ho` → Song + Lyrics\n"
-        "`/song tum hi ho` → Same\n"
-        "`/admin` → Admin panel\n\n"
-        "📢 **Pehle channel join!**", 
-        reply_markup=markup, parse_mode='Markdown')
+    if is_admin:
+        bot.send_message(message.chat.id, 
+            "🔥 **ADMIN ONLINE!** 🔥\n\n"
+            "**Commands:**\n`/song gehra hua`\n`/songLY gehra hua`\n`/admin`", 
+            parse_mode='Markdown')
+    else:
+        if not is_subscribed(user_id):
+            markup = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("📢 JOIN NOW", url="https://t.me/+JPgViOHx7bdlMDZl")
+            )
+            bot.send_message(message.chat.id, 
+                "🚫 **BOT LOCKED!**\n\n📢 **Channel join karo pehle!**\n"
+                "**Then:** `/song songname`", 
+                reply_markup=markup, parse_mode='Markdown')
+            return
+        
+        bot.send_message(message.chat.id, 
+            "🎤 **READY!** 🎵\n\n"
+            "**Use:**\n`/song gehra hua`\n`/songLY gehra hua`", 
+            parse_mode='Markdown')
 
 @bot.message_handler(commands=['song'])
-@bot.message_handler(func=lambda m: True)
-def any_song(message):
+def song_only(message):
     user_id = message.from_user.id
     
     if user_id != ADMIN_ID and not is_subscribed(user_id):
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("📢 Join Karo!", url="https://t.me/+JPgViOHx7bdlMDZl")
-        )
-        bot.reply_to(message, "🚫 **Channel join karo bhai!**", reply_markup=markup)
+        bot.reply_to(message, "🚫 **Channel join first!**")
         return
     
-    query = message.text.replace('/song ', '').strip()
+    query = ' '.join(message.text.split()[1:]).strip()
     if not query:
-        bot.reply_to(message, "❌ **Song name likho!** `jaise: tum hi ho`")
+        bot.reply_to(message, "❌ **/song SONGNAME**")
         return
     
-    status = bot.reply_to(message, f"🔍 **{query}** dhund raha...")
+    music = get_exact_song(query)
+    if music['success']:
+        try:
+            bot.send_audio(message.chat.id, music['url'], 
+                          caption=f"🎵 **{music['title']}** | 320kbps 🎵",
+                          parse_mode='Markdown')
+            bot.reply_to(message, "✅ **Song delivered!** 🎵")
+        except Exception as e:
+            bot.reply_to(message, f"❌ **Download error:** {str(e)[:50]}")
+    else:
+        bot.reply_to(message, f"❌ **{query}** not found!")
+
+@bot.message_handler(commands=['songLY'])
+def song_lyrics(message):
+    user_id = message.from_user.id
+    
+    if user_id != ADMIN_ID and not is_subscribed(user_id):
+        bot.reply_to(message, "🚫 **Channel join first!**")
+        return
+    
+    query = ' '.join(message.text.split()[1:]).strip()
+    if not query:
+        bot.reply_to(message, "❌ **/songLY SONGNAME**")
+        return
     
     # Song
-    music = get_any_song(query)
+    music = get_exact_song(query)
     if music['success']:
         try:
             bot.send_audio(message.chat.id, music['url'], 
@@ -100,65 +154,48 @@ def any_song(message):
                           parse_mode='Markdown')
         except:
             pass
-    else:
-        bot.send_message(message.chat.id, "❌ **Song nahi mila!**")
-
+    
     # Lyrics
-    lyrics = get_lyrics(query)
+    lyrics = get_exact_lyrics(query)
     if lyrics:
         bot.send_message(message.chat.id, lyrics, parse_mode='Markdown')
     else:
-        bot.send_message(message.chat.id, f"❌ **{query}** - Lyrics nahi mile!")
-    
-    bot.delete_message(status.chat.id, status.id)
+        bot.send_message(message.chat.id, f"❌ **{query}** lyrics not found!")
 
-# ==================== 🔥 PRO ADMIN PANEL 🔥 ====================
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
         return
     
     markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"),
-        InlineKeyboardButton("👥 Stats", callback_data="stats")
-    )
-    markup.row(
-        InlineKeyboardButton("🔄 Restart", callback_data="restart"),
-        InlineKeyboardButton("❌ Close", callback_data="close_admin")
-    )
+    markup.row(InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"))
+    markup.row(InlineKeyboardButton("📊 Stats", callback_data="stats"))
     
-    bot.send_message(message.chat.id, 
-        "🔥 **ADMIN PANEL** 🔥\n\n"
-        "Choose option:", reply_markup=markup, parse_mode='Markdown')
+    bot.send_message(message.chat.id, "🔥 **ADMIN PANEL** 🔥", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Admin only!")
-        return
+def admin_cb(call):
+    if call.from_user.id != ADMIN_ID: return
     
     if call.data == "broadcast":
-        msg = bot.send_message(call.message.chat.id, "📢 **Broadcast message bhejo:**")
-        bot.register_next_step_handler(msg, send_broadcast)
-    
+        bot.send_message(call.message.chat.id, "📢 Send broadcast:")
+        bot.register_next_step_handler(bot.send_message(call.message.chat.id, "📢 Message:"), lambda m: admin_broadcast(m, call.message.chat.id))
     elif call.data == "stats":
-        bot.edit_message_text("📊 **Stats:**\n• Uptime: 24/7\n• API: Live\n• Users: 1000+", 
-                            call.message.chat.id, call.message.id)
-    
-    elif call.data == "restart":
-        bot.edit_message_text("🔄 **Bot restarting...** (Demo)", 
-                            call.message.chat.id, call.message.id)
-    
-    elif call.data == "close_admin":
-        bot.delete_message(call.message.chat.id, call.message.id)
+        bot.edit_message_text("📊 **Bot Live & Healthy!** ✅", call.message.chat.id, call.message.id)
 
-def send_broadcast(message):
+def admin_broadcast(message, chat_id):
     try:
         bot.send_message(CHANNEL_ID, message.text)
-        bot.reply_to(message, "✅ **Broadcast sent to channel!**")
+        bot.send_message(chat_id, "✅ **Broadcast sent!**")
     except:
-        bot.reply_to(message, "❌ **Error!**")
+        bot.send_message(chat_id, "❌ **Broadcast failed!**")
 
-print("🚀 **ANY SONG KARAOKE BOT LIVE!** 🎤")
-bot.infinity_polling()
+# ==================== ANTI-CRASH POLLING ====================
+print("🚀 **Starting polling...**")
+while True:
+    try:
+        bot.infinity_polling(none_stop=True, interval=1, timeout=20)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        print("🔄 Restarting in 10s...")
+        time.sleep(10)
