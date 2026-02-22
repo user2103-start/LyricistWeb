@@ -182,8 +182,6 @@ def start_handler(message):
 🔥 **Examples:**
 `/song tum hi ho`
 `/song kesariya`
-`/song dilbar`
-`/song satranga`
 `/song heeriye`
 `/song shape of you`
 """
@@ -420,8 +418,3 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, welcome, parse_mode="Markdown")
         else:
             bot.answer_callback_query(call.id, "❌ Please join the channel first!", show_alert=True)
-
-def broadcast_message(message):
-    """Handle broadcast message"""
-    if message.text == "/cancel":
-        bot.send_message(message.chat.id,
