@@ -1,135 +1,271 @@
 import telebot
-import requests
-import time
+import asyncio
+import aiohttp
 import os
+import json
+import time
+import requests
+import io
+import logging
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import lyricsgenius
-from urllib.parse import quote
 from flask import Flask, request
+from urllib.parse import quote
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "8454384380:AAH1XIgIJ4qnzvJasPCNgpU7rSlPbiflbRY"
-CHANNEL_ID = "-1003751644036"
-CHANNEL_LINK = "https://t.me/+JPgViOHx7bdlMDZl"
-ADMIN_ID = 6593129349
-GENIUS_TOKEN = "w-XTArszGpAQaaLu-JlViwy1e-0rxx4dvwqQzOEtcmmpYndHm_nkFTvAB5BsY-ww"
+# Set these in Render Environment Variables!
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Your Telegram Bot Token
+CHANNEL_ID = os.getenv("CHANNEL_ID", "-1003751644036")
+CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/+JPgViOHx7bdlMDZl")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6593129349"))
+GENIUS_TOKEN = os.getenv("GENIUS_TOKEN")  # Genius API Token
+
+# ==================== LOGGING ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-bot = telebot.TeleBot(BOT_TOKEN)
-genius = lyricsgenius.Genius(GENIUS_TOKEN, verbose=False)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-print("🎵 KARAOKE BOT LIVE - FIXED VERSION!")
+# ==================== ASYNC SESSION ====================
+async_session = None
+
+def get_async_session():
+    global async_session
+    if async_session is None:
+        async_session = aiohttp.ClientSession()
+    return async_session
+
+# ==================== UNLIMITED SONG SEARCH APIs ====================
+# Ye APIs kisi bhi song ko search kar sakte hain - unlimited!
+
+SONG_APIS = [
+    {
+        "name": "JioSaavn API",
+        "url": "https://saavn-api.vercel.app/search?q=",
+        "format": lambda data: {
+            'url': data['downloadUrl'][-1]['url'] if isinstance(data.get('downloadUrl'), list) else data.get('downloadUrl'),
+            'title': data.get('title', 'Unknown'),
+            'artist': ', '.join([a['name'] for a in data.get('artists', {}).get('primary', [])]) or 'Unknown',
+            'image': data.get('image', ''),
+            'success': True
+        }
+    },
+    {
+        "name": "Music API 1",
+        "url": "https://music-api-tau.vercel.app/api/search?q=",
+        "format": lambda data: {
+            'url': data.get('url') or data.get('download_url') or data.get('link'),
+            'title': data.get('title', 'Unknown'),
+            'artist': data.get('artist', 'Unknown'),
+            'image': data.get('image', ''),
+            'success': True
+        }
+    },
+    {
+        "name": "Deezer API",
+        "url": "https://api.deezer.com/search?q=",
+        "format": lambda data: {
+            'url': data.get('preview'),
+            'title': data.get('title', 'Unknown'),
+            'artist': data.get('artist', {}).get('name', 'Unknown') if isinstance(data.get('artist'), dict) else str(data.get('artist')),
+            'image': data.get('album', {}).get('cover_medium', '') if isinstance(data.get('album'), dict) else '',
+            'success': True
+        }
+    },
+    {
+        "name": "iTunes API",
+        "url": "https://itunes.apple.com/search?term=",
+        "format": lambda data: {
+            'url': data.get('artworkUrl100').replace('100x100', '600x600') if data.get('artworkUrl100') else None,
+            'title': data.get('trackName', 'Unknown'),
+            'artist': data.get('artistName', 'Unknown'),
+            'image': data.get('artworkUrl100', ''),
+            'success': True
+        }
+    }
+]
+
+async def search_song_async(query):
+    """Search ANY song using multiple APIs"""
+    logger.info(f"🔍 Searching: {query}")
+    
+    session = get_async_session()
+    
+    for api in SONG_APIS:
+        try:
+            # Clean query
+            clean_query = quote(query.strip())
+            url = f"{api['url']}{clean_query}&limit=3"
+            
+            logger.info(f"📡 Trying: {api['name']}")
+            
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                if resp.status == 200:
+                    try:
+                        data = await resp.json()
+                        
+                        # Handle different API response formats
+                        if "deezer" in api['url']:
+                            if data.get('data') and len(data['data']) > 0:
+                                result = api['format'](data['data'][0])
+                                if result.get('url'):
+                                    logger.info(f"✅ Found on: {api['name']}")
+                                    return result
+                        
+                        elif "itunes" in api['url']:
+                            if data.get('results') and len(data['results']) > 0:
+                                result = api['format'](data['results'][0])
+                                if result.get('url'):
+                                    logger.info(f"✅ Found on: {api['name']}")
+                                    return result
+                        
+                        elif isinstance(data, list) and len(data) > 0:
+                            result = api['format'](data[0])
+                            if result.get('url') and 'http' in str(result['url']):
+                                logger.info(f"✅ Found on: {api['name']}")
+                                return result
+                        
+                        elif isinstance(data, dict) and data.get('results'):
+                            result = api['format'](data['results'][0])
+                            if result.get('url'):
+                                logger.info(f"✅ Found on: {api['name']}")
+                                return result
+                                
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        logger.error(f"Parse error ({api['name']}): {e}")
+                        continue
+                        
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ Timeout: {api['name']}")
+            continue
+        except Exception as e:
+            logger.error(f"❌ Error ({api['name']}): {e}")
+            continue
+    
+    logger.error(f"❌ No song found: {query}")
+    return None
+
+# ==================== FALLBACK: DIRECT DOWNLOAD APIs ====================
+def search_song_sync(query):
+    """Sync fallback for when async fails"""
+    fallback_apis = [
+        "https://music-api-tau.vercel.app/getSongs?q=",
+        "https://free-music-api.vercel.app/search?q=",
+    ]
+    
+    for api_url in fallback_apis:
+        try:
+            resp = requests.get(f"{api_url}{quote(query)}", timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    song = data[0]
+                    url = song.get('url') or song.get('download_url') or song.get('link')
+                    if url and 'http' in str(url):
+                        return {
+                            'url': url,
+                            'title': song.get('title', query),
+                            'artist': song.get('artist', 'Unknown'),
+                            'success': True
+                        }
+        except:
+            continue
+    
+    return None
+
+# ==================== GENIUS LYRICS ====================
+def get_lyrics(query):
+    """Get lyrics from Genius"""
+    try:
+        import lyricsgenius
+        
+        genius = lyricsgenius.Genius(
+            GENIUS_TOKEN, 
+            verbose=False, 
+            timeout=15,
+            retries=3
+        )
+        
+        # Search for song
+        songs = genius.search(query, per_page=5)
+        
+        if songs and len(songs) > 0:
+            # Try to find best match
+            for song in songs:
+                try:
+                    # Get lyrics
+                    lyrics = genius.lyrics(song.id)
+                    
+                    if lyrics and len(lyrics) > 100:
+                        # Format lyrics
+                        lines = [l.strip() for l in lyrics.split('\n') 
+                                if l.strip() and len(l.strip()) > 3][:20]
+                        
+                        if len(lines) > 5:
+                            visual = "🎤 **VISUAL LYRICS** 🎵\n\n"
+                            for i, line in enumerate(lines, 1):
+                                emoji = "✨" if i % 2 else "🎶"
+                                visual += f"{emoji} `{line}`\n"
+                            
+                            visual += f"\n👤 **{song.artist}** | 🎵 **{song.title}**"
+                            return visual
+                            
+                except Exception as e:
+                    logger.error(f"Lyrics error: {e}")
+                    continue
+        
+    except Exception as e:
+        logger.error(f"Genius API error: {e}")
+    
+    return "❌ **Lyrics not found!**\n\nTry English song names for better results."
 
 # ==================== FORCE SUBSCRIBE ====================
 def is_subscribed(user_id):
     try:
         member = bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except:
+    except Exception as e:
+        logger.error(f"Subscribe check error: {e}")
         return False
-
-# ==================== POPULAR HINDI SONGS (GUARANTEED!) ====================
-def get_popular_song(query):
-    song_map = {
-        "tum hi ho": {"title": "Tum Hi Ho", "artist": "Arijit Singh", "url": "https://h.msdl.vip/tum_hi_ho.mp3"},
-        "dilbar": {"title": "Dilbar", "artist": "Satyameva Jayate", "url": "https://h.msdl.vip/dilbar.mp3"},
-        "gehra hua": {"title": "Gehra Hai Tera Pyar", "artist": "Jubin Nautiyal", "url": "https://h.msdl.vip/gehra_hai.mp3"},
-        "kal ho naa ho": {"title": "Kal Ho Naa Ho", "artist": "Sonu Nigam", "url": "https://h.msdl.vip/kal_ho_naa_ho.mp3"},
-        "channa mereya": {"title": "Channa Mereya", "artist": "Arijit Singh", "url": "https://h.msdl.vip/channa_mereya.mp3"},
-        "raabta": {"title": "Raabta", "artist": "Arijit Singh", "url": "https://h.msdl.vip/raabta.mp3"},
-        "phir bhi tumko": {"title": "Phir Bhi Tumko Chahunga", "artist": "Arijit Singh", "url": "https://h.msdl.vip/phir_bhi.mp3"}
-    }
-    
-    query_lower = query.lower()
-    for key, info in song_map.items():
-        if key in query_lower:
-            return info
-    return None
-
-# ==================== FALLBACK APIs (SUPER FAST!) ====================
-def get_fallback_song(query):
-    apis = [
-        "https://music-api-tau.vercel.app/getSongs?q=",
-        "https://free-music-api2.vercel.app/getSongs?q=",
-        "https://aurora-music-api.vercel.app/getSongs?q=",
-        "https://music-api-nine.vercel.app/getSongs?q="
-    ]
-    
-    for api_url in apis:
-        try:
-            resp = requests.get(api_url + quote(query), timeout=8).json()
-            if isinstance(resp, list) and len(resp) > 0:
-                song = resp[0]
-                url = song.get('download_url') or song.get('320') or song.get('url')
-                if url and 'http' in url:
-                    return {
-                        'url': url,
-                        'title': song.get('title', query),
-                        'artist': song.get('artist', 'Music'),
-                        'success': True
-                    }
-        except:
-            continue
-    return None
-
-# ==================== MAIN SONG ENGINE ====================
-def get_song(query):
-    print(f"🔍 Searching: {query}")
-    
-    # 1. Popular songs first (INSTANT!)
-    song = get_popular_song(query)
-    if song:
-        print(f"✅ Popular match: {song['title']}")
-        return {'url': song['url'], 'title': song['title'], 'artist': song['artist']}
-    
-    # 2. Fallback APIs
-    song = get_fallback_song(query)
-    if song:
-        print(f"✅ Fallback found: {song['title']}")
-        return song
-    
-    print(f"❌ No song found for: {query}")
-    return None
-
-# ==================== GENIUS LYRICS ====================
-def get_visual_lyrics(query):
-    try:
-        songs = genius.search(query)
-        if songs and len(songs) > 0:
-            song = songs[0]
-            lyrics = genius.lyrics(song.id)
-            lines = [l.strip() for l in lyrics.split('\n') if l.strip() and len(l.strip()) > 1][:12]
-            
-            visual = "🎤 **VISUAL LYRICS** 🎵\n\n"
-            for i, line in enumerate(lines, 1):
-                emoji = "✨" if i % 2 else "🎶"
-                visual += f"{emoji} `{line}`\n"
-            
-            visual += f"\n👤 **{song.artist}** | 🎵 **{song.title}**"
-            return visual
-    except:
-        pass
-    return "❌ **Lyrics not found!** Try English/Hindi hits"
 
 # ==================== COMMANDS ====================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
+    first_name = message.from_user.first_name
     
-    welcome = (
-        "🎨 **KARAOKE BOT LIVE!** 🚀\n\n"
-        "🎵 **320kbps MP3**\n"
-        "✨ **Visual Lyrics**\n\n"
-        "**Working Commands:**\n"
-        "• `/song tum hi ho`\n"
-        "• `/song dilbar`\n"
-        "• `/song gehra hua`\n"
-        "• `/song channa mereya`\n\n"
-        "`/songLY tum hi ho` 👈 Lyrics + Song"
-    )
+    welcome = f"""
+🎵 **NAMASTE {first_name}!** 🙏
+
+🎤 **KARAOKE BOT - UNLIMITED EDITION** 🚀
+
+✨ **Features:**
+- 🎶 **Any Song Search** - Unlimited!
+- 📝 **Visual Lyrics** - Synced with song
+- ⚡ **Super Fast** - Multiple APIs
+- 🎧 **320kbps Quality**
+
+📖 **Commands:**
+- `/song [song name]` - Play any song
+- `/songLY [song name]` - Song + Lyrics
+- `/lyrics [song name]` - Only lyrics
+
+🔥 **Examples:**
+`/song tum hi ho`
+`/song kesariya`
+`/song shape of you`
+`/song dilbar`
+`/song satranga`
+`/song heeriye`
+"""
     
     if user_id == ADMIN_ID:
-        bot.send_message(message.chat.id, welcome + "\n\n👑 **ADMIN MODE**")
+        bot.send_message(message.chat.id, welcome + "\n👑 **ADMIN MODE**")
         return
     
     if not is_subscribed(user_id):
@@ -138,7 +274,8 @@ def start_handler(message):
         )
         bot.send_message(message.chat.id, 
             "🚫 **JOIN CHANNEL FIRST!**\n\n"
-            f"📢 [JOIN HERE]({CHANNEL_LINK})", 
+            f"📢 [JOIN HERE]({CHANNEL_LINK})\n\n"
+            "Bot use karne ke liye channel join karein!",
             reply_markup=markup, parse_mode='Markdown', disable_web_page_preview=True)
         return
     
@@ -148,126 +285,169 @@ def start_handler(message):
 def song_handler(message):
     user_id = message.from_user.id
     
+    # Check subscription
     if user_id != ADMIN_ID and not is_subscribed(user_id):
-        bot.reply_to(message, "🚫 **Join channel first!**")
+        bot.reply_to(message, "🚫 **Join channel first!**\n\nUse: `/song [song name]`")
         return
     
     query = message.text[6:].strip()
     if not query:
-        bot.reply_to(message, "❌ **Use:** `/song tum hi ho`")
+        bot.reply_to(message, "❌ **Usage:** `/song tum hi ho`\n\nTry: `/song kesariya`")
         return
     
-    msg = bot.reply_to(message, f"🔍 **Searching '{query}'**...")
+    # Send searching message
+    search_msg = bot.reply_to(message, f"🔍 **Searching:** `{query}`\n\n⏳ Please wait...")
     
-    music = get_song(query)
+    # Try async search first
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        music = loop.run_until_complete(search_song_async(query))
+    except Exception as e:
+        logger.error(f"Async error: {e}")
+        music = None
+    finally:
+        loop.close()
+    
+    # Fallback to sync if async fails
+    if not music or not music.get('url'):
+        logger.info("🔄 Trying fallback search...")
+        music = search_song_sync(query)
+    
     if music and music.get('url'):
         try:
-            caption = f"🎵 **{music['title']}**\n👤 **{music['artist']}**\n✨ **320kbps**"
-            with open('temp.mp3', 'wb') as f:
-                f.write(requests.get(music['url']).content)
+            # Create caption
+            caption = (
+                f"🎵 **{music['title']}**\n"
+                f"👤 **{music['artist']}**\n"
+                f"✨ **320kbps HD** ✅\n\n"
+                f"🔗 Requested by: @{message.from_user.username or 'User'}"
+            )
             
-            bot.send_audio(message.chat.id, open('temp.mp3', 'rb'), 
-                          caption=caption,
-                          title=music['title'],
-                          performer=music['artist'])
-            os.remove('temp.mp3')
+            # Try to send audio
+            try:
+                # Method 1: Direct URL (faster)
+                bot.send_audio(
+                    message.chat.id, 
+                    music['url'],
+                    caption=caption,
+                    title=music['title'],
+                    performer=music['artist']
+                )
+                logger.info(f"✅ Sent: {music['title']}")
+                
+            except Exception as e:
+                logger.error(f"Direct send failed: {e}")
+                
+                # Method 2: Download and send
+                try:
+                    resp = requests.get(music['url'], timeout=20)
+                    if resp.status_code == 200:
+                        audio_file = io.BytesIO(resp.content)
+                        bot.send_audio(
+                            message.chat.id,
+                            audio_file,
+                            caption=caption,
+                            title=music['title'],
+                            performer=music['artist']
+                        )
+                        logger.info(f"✅ Sent (downloaded): {music['title']}")
+                    else:
+                        raise Exception("Download failed")
+                except Exception as download_error:
+                    logger.error(f"Download error: {download_error}")
+                    bot.edit_message_text(
+                        f"❌ **Song found but cannot send!**\n\n"
+                        f"🎵 **{music['title']}**\n"
+                        f"👤 **{music['artist']}**\n\n"
+                        f"Try another song or use `/songLY`",
+                        message.chat.id, search_msg.message_id
+                    )
+                    return
             
-            bot.delete_message(message.chat.id, msg.message_id)
-            bot.reply_to(message, f"✅ **{music['title']}** 🎶 Downloaded!")
+            # Delete search message
+            bot.delete_message(message.chat.id, search_msg.message_id)
+            
+            # Success message
+            success_msg = bot.reply_to(message, f"✅ **{music['title']}** sent! 🎶")
+            
+            # Auto delete after 10 seconds
+            import threading
+            def delete_later():
+                time.sleep(10)
+                try:
+                    bot.delete_message(message.chat.id, success_msg.message_id)
+                except:
+                    pass
+            threading.Thread(target=delete_later).start()
+            
         except Exception as e:
-            print(f"Send error: {e}")
-            bot.edit_message_text("❌ **Download failed!**\n\nTry: `tum hi ho`, `dilbar`", 
-                                message.chat.id, msg.message_id, parse_mode='Markdown')
+            logger.error(f"Send error: {e}")
+            bot.edit_message_text(
+                f"❌ **Error sending song!**\n\n"
+                f"🔍 Searched: `{query}`\n\n"
+                f"**Try:** `/song tum hi ho`",
+                message.chat.id, search_msg.message_id,
+                parse_mode='Markdown'
+            )
     else:
-        bot.edit_message_text(f"❌ **`{query}`** not found!\n\n"
-                            "✅ **Try these:**\n"
-                            "`tum hi ho`\n`dilbar`\n`gehra hua`\n`channa mereya`", 
-                            message.chat.id, msg.message_id, parse_mode='Markdown')
+        bot.edit_message_text(
+            f"❌ **Song not found!** 😔\n\n"
+            f"🔍 Searched: `{query}`\n\n"
+            f"**💡 Tips:**\n"
+            f"• Use exact song name\n"
+            f"• Try: `/song tum hi ho`\n"
+            f"• Try: `/song kesariya`\n"
+            f"• Try: `/song dilbar`",
+            message.chat.id, search_msg.message_id,
+            parse_mode='Markdown'
+        )
 
 @bot.message_handler(commands=['songLY'])
 def songlyrics_handler(message):
+    """Song + Lyrics together"""
     user_id = message.from_user.id
     
     if user_id != ADMIN_ID and not is_subscribed(user_id):
-        bot.reply_to(message, "🚫 **Join channel!**")
+        bot.reply_to(message, "🚫 **Join channel first!**")
         return
     
     query = message.text[7:].strip()
     if not query:
-        bot.reply_to(message, "❌ **Use:** `/songLY tum hi ho`")
+        bot.reply_to(message, "❌ **Usage:** `/songLY tum hi ho`")
         return
     
-    msg = bot.reply_to(message, f"🎨 **{query}** Song + Lyrics...")
+    # Send processing message
+    process_msg = bot.reply_to(message, f"🎨 **Processing:** `{query}`\n\n⏳ Song + Lyrics coming...")
     
-    # Song first
-    music = get_song(query)
+    # Get song
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        music = loop.run_until_complete(search_song_async(query))
+    except:
+        music = search_song_sync(query)
+    finally:
+        loop.close()
+    
+    # Send song if found
     if music and music.get('url'):
         try:
-            caption = f"🎵 **{music['title']}** 🎤 Lyrics below!"
+            caption = f"🎵 **{music['title']}** - Lyrics below! 👇"
             bot.send_audio(message.chat.id, music['url'], caption=caption)
         except:
             pass
     
-    # Lyrics
-    lyrics = get_visual_lyrics(query)
+    # Get and send lyrics
+    lyrics = get_lyrics(query)
     bot.send_message(message.chat.id, lyrics, parse_mode='Markdown')
-    bot.delete_message(message.chat.id, msg.message_id)
-
-@bot.message_handler(commands=['admin'])
-def admin_handler(message):
-    if message.from_user.id != ADMIN_ID:
-        return
     
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("📢 Broadcast", callback_data="bc"))
-    markup.row(InlineKeyboardButton("✅ Status", callback_data="status"))
+    # Clean up
+    bot.delete_message(message.chat.id, process_msg.message_id)
+
+@bot.message_handler(commands=['lyrics'])
+def lyrics_handler(message):
+    """Only lyrics"""
+    user_id = message.from_user.id
     
-    bot.send_message(message.chat.id, 
-        "🔥 **ADMIN PANEL - FIXED!**\n"
-        "✅ Popular Hindi Songs\n"
-        "✅ 4 Fast APIs\n"
-        "✅ Genius Lyrics", 
-        reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.from_user.id != ADMIN_ID:
-        return
-    
-    bot.answer_callback_query(call.id)
-    
-    if call.data == "bc":
-        bot.send_message(call.message.chat.id, "📢 **Broadcast:**")
-        bot.register_next_step_handler(call.message, lambda m: broadcast(m))
-    elif call.data == "status":
-        bot.edit_message_text("✅ **BOT 100% LIVE!**\n"
-                            "🎵 Popular songs working\n"
-                            "🔗 Webhook active\n"
-                            "📊 No library errors", 
-                            call.message.chat.id, call.message.id)
-
-def broadcast(message):
-    try:
-        bot.send_message(CHANNEL_ID, message.text)
-        bot.reply_to(message, "✅ **Broadcast sent!** 📢")
-    except Exception as e:
-        bot.reply_to(message, f"❌ **Failed:** {e}")
-
-# ==================== WEBHOOK ====================
-@app.route(f"/{BOT_TOKEN}", methods=['POST'])
-def webhook():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return "OK", 200
-
-@app.route('/')
-def index():
-    return "🎵 **KARAOKE BOT LIVE!** Popular Hindi Songs"
-
-if __name__ == '__main__':
-    bot.remove_webhook()
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost:5000')}/{BOT_TOKEN}"
-    bot.set_webhook(url=webhook_url)
-    print(f"✅ Webhook: {webhook_url}")
-    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
+    if user_id != ADMIN_ID and not is
